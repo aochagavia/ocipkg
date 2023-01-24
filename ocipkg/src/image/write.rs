@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use flate2::{write::GzEncoder, Compression};
 use oci_spec::image::*;
 use std::{collections::HashMap, convert::TryFrom, fs, io, path::Path};
+use std::fs::File;
+use std::io::{Read, Write};
 
 use crate::{
     digest::{Digest, DigestBuf},
@@ -24,6 +26,9 @@ pub struct Builder<W: io::Write> {
     platform: Option<Platform>,
     diff_ids: Vec<Digest>,
     layers: Vec<Descriptor>,
+    entrypoint: Option<Vec<String>>,
+    working_dir: Option<String>,
+    env: Option<Vec<String>>
 }
 
 impl<W: io::Write> Builder<W> {
@@ -37,6 +42,9 @@ impl<W: io::Write> Builder<W> {
             annotations: None,
             diff_ids: Vec::new(),
             layers: Vec::new(),
+            entrypoint: None,
+            working_dir: None,
+            env: None
         }
     }
 
@@ -66,6 +74,39 @@ impl<W: io::Write> Builder<W> {
     /// Set platform consists of architecture and OS info
     pub fn set_platform(&mut self, platform: &Platform) {
         self.platform = Some(platform.clone());
+    }
+
+    pub fn set_entrypoint(&mut self, entrypoint: Vec<String>) {
+        self.entrypoint = Some(entrypoint);
+    }
+
+    pub fn set_env(&mut self, env: Vec<String>) {
+        self.env = Some(env);
+    }
+
+    pub fn set_working_dir(&mut self, working_dir: String) {
+        self.working_dir = Some(working_dir);
+    }
+
+    /// Append a tar as a layer
+    pub fn append_tar(&mut self, tar_path: impl AsRef<Path>) -> Result<()> {
+        // TODO: not sure we want to keep this code
+        let mut tar_file = File::open(tar_path)?;
+        let mut tar_bytes = Vec::new();
+        tar_file.read_to_end(&mut tar_bytes)?;
+
+        let mut digest_buf = DigestBuf::new(Vec::new());
+        digest_buf.write_all(&tar_bytes)?;
+        let (_, layer_digest) = digest_buf.finish();
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_bytes)?;
+        let layer_bytes = encoder.finish()?;
+
+        self.diff_ids.push(layer_digest);
+        let layer_desc = self.save_blob(MediaType::ImageLayerGzip, &layer_bytes)?;
+        self.layers.push(layer_desc);
+        Ok(())
     }
 
     /// Append a files as a layer
@@ -151,8 +192,22 @@ impl<W: io::Write> Builder<W> {
             .unwrap();
         builder = builder.rootfs(rootfs);
 
-        let config = ConfigBuilder::default()
-            .labels(self.create_annotations_as_map())
+        let mut config = ConfigBuilder::default()
+            .labels(self.create_annotations_as_map());
+
+        if let Some(env) = &self.env {
+            config = config.env(env.clone());
+        }
+
+        if let Some(entrypoint) = &self.entrypoint {
+            config = config.entrypoint(entrypoint.clone());
+        }
+
+        if let Some(working_dir) = &self.working_dir {
+            config = config.working_dir(working_dir.clone());
+        }
+
+        let config = config
             .build()
             .unwrap();
         builder = builder.config(config);
